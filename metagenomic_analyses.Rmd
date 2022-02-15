@@ -1,0 +1,236 @@
+---
+title: "Analyses"
+author: "Daniel Flores Orozco"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, include=FALSE}
+#load libraries 
+library(tidyverse)
+#library (readxl)
+library(stats)
+library(dbplyr)
+library(tidyverse)
+library(ggplot2)
+library(RColorBrewer) #To create color palettes
+library(boot) #to calculate SD of diversity index
+library(kableExtra) # for fancy tables
+library(taxize) #for taxonomical annotation
+library(metacoder)
+library(vegan)
+
+options(digits = 3, scipen = 999)
+
+```
+
+```{r data, include=FALSE}
+
+#load data 
+load(file = "rda/data_resistome.rda")
+load(file = "rda/data_micro.rda")
+load(file = "rda/samples_groups.rda")
+
+```
+
+
+# 1. Microbial Communities
+
+## 1.1 Microbial communities heat trees 
+
+```{r heat tree micro, echo=FALSE, warning=FALSE, message=FALSE, fig.height=10, fig.width=10}
+
+#parse data 
+obj_meta <- parse_tax_data(data_micro, class_cols = "lineage", class_sep = ";")
+
+#calculate proportions
+obj_meta$data$tax_data <- calc_obs_props(obj_meta, "tax_data", cols = samples_groups$sample)
+
+#Calculate abundance per taxon 
+obj_meta$data$tax_abund <- calc_taxon_abund(obj_meta, "tax_data", cols = samples_groups$sample )
+
+# calculate differences between groups 
+obj_meta$data$diff_tb <- compare_groups(obj_meta, dataset = "tax_abund", 
+                                        cols = samples_groups$sample, 
+                                        groups = samples_groups$farm)
+
+# Adjust inf values 
+obj_meta$data$diff_tb <- obj_meta$data$diff_tb %>% 
+  mutate(log2_median_ratio = ifelse(log2_median_ratio == "Inf", 5, 
+                                    ifelse(log2_median_ratio == "-Inf", -5, log2_median_ratio)))
+
+
+#create the differential heat tree
+set.seed(5, sample.kind = "Rounding")
+heat_tree_matrix(obj_meta, data = "diff_tb", 
+          node_label = taxon_names, 
+          node_size = n_obs,  
+          node_color = log2_median_ratio,
+          node_color_range = diverging_palette(),
+          node_color_trans = "linear",
+          node_size_axis_label = "OTU count", 
+          node_color_axis_label = "log2 median ratio",
+          node_color_interval = c(-5,5)) 
+          #node_size_range = (c(0.01, 0.05)))
+          #node_label_size_range = c(0.01, 0.05)      )
+          #node_label_max = 150)
+
+```
+
+## 1.2 Ordination microbial communities 
+
+```{r micro ordination, echo=FALSE, warning=FALSE}
+#matrix microbial data 
+matrix_micro <- data_micro %>%
+  select(-microbe, -lineage) %>%
+  as.matrix() %>%
+  `rownames<-`(data_micro$microbe)
+
+
+#### PCoA microbial communities ####
+#PCoA micro 
+dist_micro <- vegdist(matrix_micro %>% (t), method = "bray")
+pcoa_micro <- cmdscale(dist_micro, eig = TRUE, x.ret = TRUE)
+varperc_micro <- round(pcoa_micro$eig/sum(pcoa_micro$eig)*100, 1)
+
+#create table with results 
+pcoa_micro_tb <- tibble(sample = row.names(pcoa_micro$points),
+                        farm = samples_groups$farm,
+                        x = pcoa_micro$points[,1], 
+                        y = pcoa_micro$points[,2])
+
+
+#### plot PCoA micro #### 
+pcoa_micro_tb %>% 
+  ggplot(aes(x = x, y = y, color = farm, label = sample)) + 
+  geom_label(position = position_jitter()) + 
+  labs(title = "Fig.1 PCoA micobial communities", 
+       x = paste("PC1- ", varperc_micro[1], "%", sep = ""), 
+       y = paste("PC1- ", varperc_micro[2], "%", sep = "")) + 
+  scale_color_manual(values = c("blue", "red", "black")) + 
+  theme_bw() + 
+  theme(legend.position = "none")
+
+
+```
+
+
+# 2. Resistomes 
+
+## 2.1 Resistomes details 
+
+The number of unique ARG detected in the different dairy manures were `r unique(data_resistome$gene_id) %>% length()`. These ARG encoded resistance to `r unique(data_resistome$antibiotic_class) %>% length()` antibiotics and `r unique(data_resistome$mechanism) %>% length()` different mechanisms. 
+
+```{r resistome details, echo=FALSE}
+#remove
+
+#table for metacoder 
+data_res <- data_resistome %>%
+  filter(abundance > 0) %>% 
+  mutate(root = "sample") %>%
+  unite(root, mechanism, antibiotic_class, gene_id, col = "annotation", sep = ";") %>% 
+  pivot_wider(names_from = sample, values_from = abundance)
+
+#replace NA for 0's 
+data_res[is.na(data_res)] <- 0
+
+# total ARG abundance (ARG copies/16s rRNA)
+print("total ARG abundance (ARG copies/16s rRNA)")
+data_res[,-1] %>% as.matrix() %>% colSums()
+
+#estimate number of unique aRG in manure and digestate 
+data_resistome %>% 
+  left_join(samples_groups) %>%
+  filter(abundance != 0) %>%
+  group_by(farm) %>% 
+  summarise(obs = unique(gene_id) %>% length()) %>% 
+  kable(caption = "Unique ARG in manure and digestate", booktabs = TRUE) %>% 
+  kable_classic(latex_options = "hold_position")
+
+```
+
+## 2.2 Resistome heat trees 
+
+```{r resistome heat trees, echo = FALSE, warning=FALSE, fig.height=12, fig.width=12}
+#parse data 
+obj_meta_res <- parse_tax_data(data_res, class_cols = "annotation", class_sep = ";")
+
+#calculate proportions
+obj_meta_res$data$tax_data <- calc_obs_props(obj_meta_res, "tax_data", cols = samples_groups$sample)
+
+#Calculate abundance per taxon 
+obj_meta_res$data$tax_abund <- calc_taxon_abund(obj_meta_res, "tax_data", cols = samples_groups$sample )
+
+# calculate differences between groups 
+obj_meta_res$data$diff_tb <- compare_groups(obj_meta_res, dataset = "tax_abund", 
+                                        cols = samples_groups$sample, 
+                                        groups = samples_groups$farm)
+
+# Adjust inf values 
+obj_meta_res$data$diff_tb <- obj_meta_res$data$diff_tb %>% 
+  mutate(log2_median_ratio = ifelse(log2_median_ratio == "Inf", 5, 
+                                    ifelse(log2_median_ratio == "-Inf", -5, log2_median_ratio)))
+
+
+#create the differential heat tree
+set.seed(2, sample.kind = "Rounding")
+heat_tree_matrix(obj_meta_res, data = "diff_tb", 
+          node_label = taxon_names, 
+          node_size = n_obs,  
+          node_color = log2_median_ratio,
+          node_color_range = diverging_palette(),
+          node_color_trans = "linear",
+          node_size_axis_label = "ARG count", 
+          node_color_axis_label = "log2 median ratio",
+          node_color_interval = c(-5,5)) 
+          #node_size_range = (c(0.01, 0.05)))
+          #node_label_size_range = c(0.01, 0.05)      )
+          #)
+
+```
+
+
+## 2.3 Ordination resistomes 
+
+```{r pcoa resistomes, echo=FALSE}
+#matrix with resistome data 
+matrix_resistome <- data_resistome %>%
+  filter(abundance > 0) %>% 
+  arrange(mechanism) %>%
+  select(sample, gene_id, abundance) %>% 
+  pivot_wider(names_from = gene_id, values_from = abundance) %>%
+  select(-sample) %>% 
+  as.matrix() %>% 
+  `rownames<-`(samples_groups$sample)
+
+#replace NA for 0's 
+matrix_resistome[is.na(matrix_resistome)] <- 0
+  
+
+#### PCoA resistome ####
+dist_res <- vegdist(matrix_resistome, method = "bray")
+pcoa_res <- cmdscale(dist_res, eig = TRUE, x.ret = TRUE)
+varperc_res <- round(pcoa_res$eig/sum(pcoa_res$eig)*100, 1)
+
+#create table with results 
+pcoa_res_tb <- tibble(sample = row.names(pcoa_res$points),
+                        farm = samples_groups$farm,
+                        x = pcoa_res$points[,1], 
+                        y = pcoa_res$points[,2])
+
+
+#### plot PCoA micro #### 
+pcoa_res_tb %>% 
+  ggplot(aes(x = x, y = y, color = farm, label = sample)) + 
+  geom_label(position = position_jitter()) + 
+  labs(title = "Fig. 2 PCoA resistomes", 
+       x = paste("PC1- ", varperc_res[1], "%", sep = ""), 
+       y = paste("PC1- ", varperc_res[2], "%", sep = "")) + 
+  theme_bw() + 
+  theme(legend.position = "none")
+```
+
